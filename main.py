@@ -52,13 +52,13 @@ def stest(model, datasets_test):
         else:
             label_test = label_test.long().to(DEVICE)
 
-        output, out_logits, adj, confidence, final = model(data_test)
+        output, c_loss, out_logits, adj, confidence, final = model(data_test, label_test, "Test")
 
         out_logits_all.append(out_logits.cpu().detach().numpy())  # 保存out_logits
         confidence_all.append(confidence.cpu().detach().numpy())
         all_final.append(final.cpu().detach().numpy())
         # print(output)
-        losss = nn.CrossEntropyLoss()(output, label_test)
+        losss = 0.8*nn.CrossEntropyLoss()(output, label_test)+0.2*c_loss
         eval_loss += float(losss)
         _, pred = torch.max(output, dim=1)
         num_correct = (pred == label_test).sum()
@@ -118,7 +118,7 @@ parser.add_argument('--dataset', type=str, default='ADNI', help='使用数据集
 parser.add_argument('--patch_size', type=int, default=65, help='每一个patch的时间长度')
 parser.add_argument('--batch_size', type=int, default=20, help='batch size')
 parser.add_argument('--weight_decay', default=3e-3, type=float)
-parser.add_argument('--epochs', default=300, type=int)
+parser.add_argument('--epochs', default=200, type=int)
 parser.add_argument('--lr', default=0.003, type=float)
 args = parser.parse_args()
 
@@ -177,7 +177,7 @@ for train_and_val_indices, test_indices in KF.split(dataset):
     acces = []
     eval_losses = []
     eval_acces = []
-    patiences = 30
+    patiences = 500
     min_acc = 0
 
     for epoch in range(args.epochs):
@@ -201,8 +201,8 @@ for train_and_val_indices, test_indices in KF.split(dataset):
             # # 计算参数数量
             # print("parameter_count: ", parameter_count_table(model))
 
-            output, out_logits, adj, confidence, _ = model(data)
-            batch_loss_train = closs(output, label)
+            output, c_loss, out_logits, adj, confidence, _ = model(data, label, "Train")
+            batch_loss_train = 0.8*closs(output, label)+0.3*c_loss
             optimizer.zero_grad()
             batch_loss_train.backward()
             optimizer.step()
@@ -301,3 +301,128 @@ print("*****************************************************")
 
 print(label_ten)
 print(pro_ten)
+
+for n in range(10):
+    full_dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
+    best_model = Model()
+    best_model = best_model.to(DEVICE)
+    best_model.load_state_dict(torch.load('./Save/latest'+str(n)+'.pth'))  # Load the best model saved during cross-validation
+
+    # Run the model on the full dataset
+    eval_loss, eval_acc, eval_acc_epoch, precision, recall, f1, my_auc, sensitivity, specificity, pre_all, labels_all, pro_all , out_logits_all,\
+        adj, confidence, all_final = stest(best_model, full_dataloader)
+    # Print the final evaluation metrics
+    print("N:", n)
+    print("Final Eval Acc:", eval_acc_epoch)
+    print("Final Precision:", precision)
+    print("Final Recall:", recall)
+    print("Final F1:", f1)
+    print("Final AUC:", my_auc)
+    print("Final Sensitivity:", sensitivity)
+    print("Final Specificity:", specificity)
+    print("---------------------")
+
+    # # pagerank前10个节点
+    # all_final = np.concatenate(all_final,axis=0)
+    # node_mean = np.mean(all_final, axis=0)
+    # # 计算皮尔逊相关系数矩阵
+    # adjacency_matrix = np.zeros((90, 90))
+    # for i in range(90):
+    #     for j in range(90):
+    #         if i != j:
+    #             # 计算皮尔逊相关系数
+    #             corr, _ = pearsonr(node_mean[i], node_mean[j])
+    #             # 处理负相关和零相关系数
+    #             if corr < 0:
+    #                 corr = 0  # 或者使用其他处理方法
+    #             adjacency_matrix[i, j] = corr
+    # # 构建图结构
+    # G = nx.from_numpy_array(adjacency_matrix)
+    # # 计算 PageRank
+    # pagerank_scores = nx.pagerank(G)
+    # # 将 PageRank 评分按降序排列，并选择评分最高的前 10 个节点
+    # top_10_nodes = sorted(pagerank_scores, key=pagerank_scores.get, reverse=True)[:10]
+    # top_10_scores = [pagerank_scores[node] for node in top_10_nodes]
+    # # 输出前 10 个节点的编号及其重要性分数
+    # output_lines = []
+    # for node, score in zip(top_10_nodes, top_10_scores):
+    #     line = f"Node: {node}, Score: {score}"
+    #     output_lines.append(line)
+    # # 将结果保存到txt文件中
+    # with open('pagerank_'+str(n)+'.txt', 'w') as file:
+    #     for line in output_lines:
+    #         file.write(line + "\n")
+
+    # # confidence箱型图
+    # confidence = np.concatenate(confidence, axis=0)
+    # labels = np.array(labels_all)
+    # con_0 = confidence[labels == 1]
+    # # 将数据转换为(样本数, 时间片数)
+    # con_0 = con_0.squeeze(axis=2)  # 去掉第三个维度
+    # con_0 = np.transpose(con_0, (1, 0))  # 转置为(时间片数, 样本数)
+    # # 将数据保存到CSV文件中
+    # df = pd.DataFrame(con_0, columns=["Sample_" + str(i) for i in range(con_0.shape[1])])
+    # df.to_csv('boxplot_data_12_' + str(n) + '.csv', index=False)
+    # # 绘制箱型图
+    # plt.boxplot(con_0.T, labels=["Time 1", "Time 2", "Time 3"], showfliers=False)
+    # plt.xlabel("Time slices")
+    # plt.ylabel("Score")
+    # plt.title("Boxplot of Scores for Label 0")
+    # plt.savefig('Box_12_' + str(n) + '.png')
+    # plt.clf()  # 清除当前的绘图区域
+    # plt.show()
+
+    # 保存矩阵
+    # file_name = './Adj/matrix_file_01_'+str(n)+'.txt'
+    # # 转换 Tensor 形状并保存到 txt 文件
+    # for idx, tensor in enumerate(adj):
+    #     with open(file_name, 'w') as f:
+    #         for matrix in tensor:
+    #             matrix = matrix.cpu().numpy()
+    #             matrix[matrix < 0] = 0
+    #             np.savetxt(f, matrix, fmt='%.6f')
+    #             f.write('\n')  # 在每个矩阵之间添加一个空行
+
+    # 散点图
+    # 使用PCA进行降维到2维
+    # pca = PCA(n_components=2)
+    # combined_logits = np.concatenate(out_logits_all, axis=0)  # shape: (140, 256)
+    # combined_labels = np.array(labels_all)
+    # pca_result = pca.fit_transform(combined_logits)
+    # # 绘制降维后的散点图，并根据标签不同使用不同颜色表示
+    # plt.figure(figsize=(8, 6))
+    # plt.scatter(pca_result[combined_labels == 0, 0], pca_result[combined_labels == 0, 1],
+    #             color='b', alpha=0.8, label='Class 0')  # 类别0用蓝色表示
+    # plt.scatter(pca_result[combined_labels == 1, 0], pca_result[combined_labels == 1, 1],
+    #             color='r', alpha=0.8, label='Class 1')  # 类别1用红色表示
+    # plt.title('PCA of Combined out_logits_all with Labels')
+    # plt.xlabel('Principal Component 1')
+    # plt.ylabel('Principal Component 2')
+    # plt.grid(True)
+    # plt.savefig('PCA_'+str(n)+'.png')
+    # plt.show()
+    # 使用t-SNE降维
+    # tsne = TSNE(n_components=2, perplexity=30, learning_rate=200, n_iter=1000, random_state=0)
+    tsne = TSNE(n_components=2, random_state=183)
+    combined_logits = np.concatenate(out_logits_all, axis=0)  # shape: (140, 256)
+    combined_labels = np.array(labels_all)
+    tsne_result = tsne.fit_transform(combined_logits)
+    # 绘制降维后的散点图，并根据标签不同使用不同颜色表示
+    plt.figure(figsize=(8, 6))
+    plt.scatter(tsne_result[combined_labels == 0, 0], tsne_result[combined_labels == 0, 1],
+                color='b', alpha=0.8, label='Class 0')  # 类别0用蓝色表示
+    plt.scatter(tsne_result[combined_labels == 1, 0], tsne_result[combined_labels == 1, 1],
+                color='r', alpha=0.8, label='Class 1')  # 类别1用红色表示
+    plt.title('t-SNE of Combined out_logits_all with Labels')
+    plt.xlabel('t-SNE Component 1')
+    plt.ylabel('t-SNE Component 2')
+    plt.grid(False)
+    plt.legend()
+    plt.savefig('tSNE_1_2' + str(n) + '.png')
+    plt.show()
+
+    # ROC曲线
+    # # Save the final ROC data
+    # fpr, tpr, _ = roc_curve(labels_all, pro_all)
+    # save_roc_data('./roc/1_2/final_roc_data'+str(n)+'.txt', [fpr], [tpr])
+    #

@@ -33,13 +33,29 @@ class Uncertainty(nn.Module):
 
         self.layers = nn.ModuleList([LinearLayer(mlp_dim, 1)])
 
-    def forward(self, x):
+    def forward(self, x, label, state):
         tlen, bs, num_nodes, dim = x.size()
         x = torch.reshape(x, [bs*tlen, num_nodes*dim])
         for layer in self.layers:
             x = layer(x)
-        x = x.view(bs, tlen, 1)
+        x = x.view(bs, tlen, -1)
         x = torch.sigmoid(x)
+
+        return x
+
+class ClassificationSubNetwork(nn.Module):
+    def __init__(self,
+                 mlp_dim,
+                 num_classes):
+        super(ClassificationSubNetwork, self).__init__()
+        self.layers = nn.ModuleList([LinearLayer(mlp_dim, num_classes)])
+
+    def forward(self, x):
+        tlen, bs, num_nodes, dim = x.size()
+        x = torch.reshape(x, [bs * tlen, num_nodes * dim])
+        for layer in self.layers:
+            x = layer(x)
+        x = x.view(bs, tlen, -1)
         return x
 
 class GraphConvolution(nn.Module):
@@ -222,6 +238,7 @@ class Model(nn.Module):
     def __init__(self):
         super(Model, self).__init__()
         self.un = Uncertainty(5850)   # adni
+        self.Classification = ClassificationSubNetwork(5850, 2)
         # self.un = Uncertainty(6380)     # PD
         self.st_1 = STBlock(65, 30)
         # self.st_2 = STBlock(30, 30)
@@ -242,12 +259,25 @@ class Model(nn.Module):
         self.temporal_Att = TemporalAttention(num_of_timesteps=3, num_of_vertices=90, num_of_features=65)
         # self.spatial_At = SpatialAttention(num_of_timesteps=4, num_of_vertices=116, num_of_features=55)
 
-    def forward(self, fdata):
+    def confidence_loss(self, TCPLogit, TCPConfidence, label):
+        # 扩展 label 的维度以匹配 TCPLogit 的时间窗口
+        label_expanded = label.unsqueeze(1).expand(-1, TCPLogit.size(1))  # shape: (20, 3)
+        # 对 TCPLogit 进行 softmax，获取每个类别的概率
+        pred = F.softmax(TCPLogit, dim=-1)  # shape: (20, 3, 2)
+        # 获取真实类别的概率 (TCP)
+        p_target = torch.gather(input=pred, dim=-1, index=label_expanded.unsqueeze(-1)).squeeze(-1)  # shape: (20, 3)
+        # 计算 MSE 损失
+        c_loss = torch.mean(F.mse_loss(TCPConfidence.view(-1), p_target.view(-1), reduction='none'))
+        return c_loss
+
+    def forward(self, fdata, label, state):
         # fdata：（20，3, 90，80） bs, tlen, num_nodes, time_seq
         fdata = fdata.permute(1,0,2,3)
 
         # 每个时间片获得一个不确定性分数
-        Confidence_score = self.un(fdata)
+        Confidence_score = self.un(fdata, label, state)
+        TCP_logit = self.Classification(fdata)
+        c_loss = self.confidence_loss(TCP_logit, Confidence_score, label)
 
         # 时间注意力
         input = fdata.permute(1,0,2,3)
@@ -288,7 +318,7 @@ class Model(nn.Module):
         block_outs = self.d2(self.bn2(self.l2(block_outs)))
         out_logits = self.l3(block_outs)
 
-        return F.softmax(out_logits, dim=1), block_outs, all_adj, Confidence_score, final
+        return F.softmax(out_logits, dim=1), c_loss, block_outs, all_adj, Confidence_score, final
 
 
 class NModel(nn.Module):
